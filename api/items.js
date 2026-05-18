@@ -1,6 +1,9 @@
 const FEISHU_BASE = 'https://open.feishu.cn/open-apis';
+let cachedToken = null;
+let tokenExpiry = 0;
 
 async function getToken() {
+  if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
   const res = await fetch(`${FEISHU_BASE}/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -10,8 +13,10 @@ async function getToken() {
     }),
   });
   const data = await res.json();
-  if (data.code !== 0) throw new Error('Auth failed: ' + JSON.stringify(data));
-  return data.tenant_access_token;
+  if (data.code !== 0) throw new Error('Feishu auth failed: ' + data.msg);
+  cachedToken = data.tenant_access_token;
+  tokenExpiry = Date.now() + (data.expire - 60) * 1000;
+  return cachedToken;
 }
 
 async function feishuFetch(method, path, body) {
@@ -25,8 +30,7 @@ async function feishuFetch(method, path, body) {
   };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(`${FEISHU_BASE}${path}`, opts);
-  const data = await res.json();
-  return data;
+  return res.json();
 }
 
 export default async function handler(req, res) {
@@ -41,10 +45,11 @@ export default async function handler(req, res) {
   try {
     if (req.method === 'GET') {
       const data = await feishuFetch('GET', `/bitable/v1/apps/${APP}/tables/${TABLE}/records?page_size=500`);
-      if (data.code !== 0) return res.status(500).json({ error: 'Feishu API error', detail: data });
+      if (data.code !== 0) throw new Error(data.msg);
       const items = (data.data?.items || []).map(r => ({
         id: r.record_id,
         ...r.fields,
+        created_at: r.fields['创建时间'] || r.record_id,
       }));
       return res.json(items);
     }
@@ -62,7 +67,7 @@ export default async function handler(req, res) {
       };
       if (date) fields['日期'] = new Date(date).getTime();
       const data = await feishuFetch('POST', `/bitable/v1/apps/${APP}/tables/${TABLE}/records`, { fields });
-      if (data.code !== 0) return res.status(500).json({ error: 'Feishu API error', detail: data });
+      if (data.code !== 0) throw new Error(data.msg);
       return res.json({ id: data.data?.record?.record_id });
     }
 
@@ -78,7 +83,7 @@ export default async function handler(req, res) {
       if (rest.note !== undefined) fields['备注'] = rest.note;
       if (rest.date !== undefined) fields['日期'] = rest.date ? new Date(rest.date).getTime() : null;
       const data = await feishuFetch('PUT', `/bitable/v1/apps/${APP}/tables/${TABLE}/records/${id}`, { fields });
-      if (data.code !== 0) return res.status(500).json({ error: 'Feishu API error', detail: data });
+      if (data.code !== 0) throw new Error(data.msg);
       return res.json({ ok: true });
     }
 
@@ -86,12 +91,12 @@ export default async function handler(req, res) {
       const { id } = req.query;
       if (!id) return res.status(400).json({ error: 'id required' });
       const data = await feishuFetch('DELETE', `/bitable/v1/apps/${APP}/tables/${TABLE}/records/${id}`);
-      if (data.code !== 0) return res.status(500).json({ error: 'Feishu API error', detail: data });
+      if (data.code !== 0) throw new Error(data.msg);
       return res.json({ ok: true });
     }
 
     res.status(405).end();
   } catch (e) {
-    res.status(500).json({ error: e.message, stack: e.stack });
+    res.status(500).json({ error: e.message });
   }
 }
